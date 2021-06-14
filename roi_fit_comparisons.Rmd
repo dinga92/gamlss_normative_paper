@@ -1,0 +1,201 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+set.seed(1)
+source('helpers.R')
+
+library(caret)
+library(data.table)
+
+data <- as.data.frame(fread('/home/dlpfc/Code/normative/all_data.csv', sep = ','))
+data <- data[data$diagnosis == 0,]
+selected_sites <- names(table(data$site_id)[table(data$site_id) >= 30])
+data <- data[data$site_id %in% selected_sites,]
+data$site_id <- as.factor(data$site_id)
+data$site_id <- droplevels(data$site_id)
+
+data <- data[data$Mean_Thickness > 1.8,]
+data <- data[data$Mean_Thickness < 3.5,]
+
+# get rid of special characters from variable names, otherwise the formula
+# interface for model fitting won't owrk properly
+names(data) <- gsub('&', 'and', names(data))
+names(data) <- gsub('-', '_', names(data))
+
+data_ukbb <- data[data$site_id == 11025,]
+
+train_idx_ukbb <- createDataPartition(data$age, p = 0.7, list = F)
+df_train_ukbb <- data_ukbb[train_idx_ukbb,]
+df_test_ukbb <- data_ukbb[-train_idx_ukbb,]
+```
+
+takes 7 minutes
+
+```{r}
+library(mgcv)
+
+start.time <- Sys.time()
+
+measures_m1 <- list()
+measures_m2 <- list()
+
+# looping to fit a model to each ROI
+for(i_roi in 1:150){
+  cat('\r', i_roi) # printing i
+  # to fit gam, we need ot use the formula interface, which is bit awkward
+  # when looping.
+  # ther is a separate formula for each parameter of the distribution `~1` means
+  # that we are only fitting an intercept of that distribution `~ age` means that
+  # we are modeling y as a linear funciton of age and `~ s(age) means that we are modeling
+  # y as a nonlinear/smooth function of age.
+  formula_mean <- as.formula(paste(names(df_train_ukbb)[5+i_roi], "~" , "s(age) + gender"))
+
+  # gaussian model
+  m1 <- gam(list(formula_mean, # first element is a formula for mu
+                 ~ 1 # second element is a formula for sigma, here I am only fitting intercept for sigma
+                 # which means that the model is homoskedastic,
+                 ),
+            data=df_train_ukbb,
+            family = gaulss(),
+            optimizer = 'efs')
+
+  # nongaussian model
+  m2 <- gam(list(formula_mean, # formula for mu
+                                ~ 1, # formula for sigma
+                                ~ 1, # formula for nu (skewness)
+                                ~ 1), # formula for tau (kurtosis)
+            data=df_train_ukbb,
+            family = shash(),
+            optimizer = 'efs')
+
+
+  predictions_m1 <- predict(m1, newdata = df_test_ukbb)
+  predictions_m2 <- predict(m2, newdata = df_test_ukbb)
+
+  scores_m1 <- params_to_scores(df_test_ukbb[,5+i_roi], predictions_m1)
+  scores_m2 <- params_to_scores(df_test_ukbb[,5+i_roi], predictions_m2)
+
+  measures_m1[[i_roi]] <- cbind(mean(scores_m1$log_densities),
+                        mean(scores_m1$log_densities_censored),
+                        calibration_descriptives(scores_m1$z_randomized))
+  measures_m2[[i_roi]] <- cbind(mean(scores_m2$log_densities),
+                        mean(scores_m2$log_densities_censored),
+                        calibration_descriptives(scores_m2$z_randomized))
+}
+measures_m1 <- do.call(rbind, measures_m1)
+measures_m2 <- do.call(rbind, measures_m2)
+
+end.time <- Sys.time()
+elapsed.time <- round((end.time - start.time), 3)
+print(elapsed.time)
+```
+
+
+
+
+```{r, fig.width=5, fig.asp=1}
+library(psych)
+library(ggplot2)
+library(patchwork)
+
+ba_df <- data.frame('logscore_gauss' = measures_m1[,1], 
+                    'logscore_nongauss' = measures_m2[,1], 
+                    'logscore_cens_gauss' = measures_m1[,2], 
+                    'logscore_cens_nongauss' = measures_m2[,2], 
+                    'W_gauss' = measures_m1$W,
+                    'W_nongauss' = measures_m2$W,
+                    'skew_gauss' = measures_m1$skew,
+                    'skew_nongauss' = measures_m2$skew,
+                    'kurtosis_gauss' = measures_m1$kurtosis,
+                    'kurtosis_nongauss' = measures_m2$kurtosis)
+
+linetype = 'longdash'
+
+p1 <- ggplot(data=ba_df) +
+  geom_point(aes(x=(logscore_gauss + logscore_nongauss) / 2,
+                 y=logscore_gauss - logscore_nongauss, 
+                 # color='a', 
+                 color=logscore_gauss > logscore_nongauss,
+                 shape='a')) +
+  geom_hline(yintercept = 0, linetype=linetype) +
+  theme_cowplot() +
+  guides(color=F, shape=F) +
+  labs(title = 'Logarithmic score',
+       x='average l',
+       y='l gaussian - l non-Gaussian');
+
+lims = c(0.96, 1)
+p2 <- ggplot(data=ba_df) +
+  geom_point(aes(x=W_gauss, y= W_nongauss,
+                 # color='a', 
+                 color=W_gauss > W_nongauss,
+                 shape='a')) +
+  # geom_hline(yintercept = 0, col='red') +
+  geom_abline(intercept = 0, slope = 1, linetype=linetype) +
+  xlim(lims) + ylim(lims) +
+  theme_cowplot() +
+  guides(color=F, shape=F) +
+  labs(title = 'Calibration',
+       x='W Gaussian',
+       y='W non-Gaussian'); 
+
+p3 <- ggplot(data=ba_df) +
+  geom_point(aes(x=skew_gauss, y=skew_nongauss, 
+                 # color='a',
+                 color=abs(skew_gauss) < abs(skew_nongauss),
+                 shape='a')) +
+  xlim(c(min(c(ba_df$skew_gauss, ba_df$skew_nongauss), na.rm = T),
+         max(c(ba_df$skew_gauss, ba_df$skew_nongauss), na.rm = T))) +
+  ylim(c(min(c(ba_df$skew_gauss, ba_df$skew_nongauss), na.rm = T),
+         max(c(ba_df$skew_gauss, ba_df$skew_nongauss), na.rm = T))) +
+  geom_hline(yintercept = 0, linetype=linetype) +
+  geom_vline(xintercept = 0, linetype=linetype) +
+  theme_cowplot() +
+  guides(color=F, shape=F) +
+  ggtitle("Skewness") +
+  labs(x='Skewness Gaussian',
+       y='Skewness non-Gaussian'); 
+
+p4 <- ggplot(data=ba_df) +
+  geom_point(aes(x=kurtosis_gauss, y=kurtosis_nongauss, 
+                 # color='a', 
+                 color=abs(kurtosis_gauss) < abs(kurtosis_nongauss),
+                 shape='a')) +
+  xlim(c(min(c(ba_df$kurtosis_gauss, ba_df$kurtosis_nongauss), na.rm = T),
+         max(c(ba_df$kurtosis_gauss, ba_df$kurtosis_nongauss), na.rm = T))) +
+  ylim(c(min(c(ba_df$kurtosis_gauss, ba_df$kurtosis_nongauss), na.rm = T),
+         max(c(ba_df$kurtosis_gauss, ba_df$kurtosis_nongauss), na.rm = T))) +
+  geom_hline(yintercept = 0, linetype=linetype) +
+  geom_vline(xintercept = 0, linetype=linetype) +
+  theme_cowplot() +
+  ggtitle("Kurtosis") +
+  labs(x='Kurtosis Gaussian',
+       y='Kurtosis non-Gaussian'); 
+
+p_all <- p1 + p2 + p3 + p4 +
+  plot_layout(guides = 'collect', ) +
+  plot_annotation(tag_levels = 'A') & 
+  theme(text=element_text(size=9),
+                  axis.text = element_text(size=9)) & 
+  scale_color_OkabeIto(order=c(6,2),
+                       na.translate=F,
+                       name=element_blank(), 
+                       labels=c('Non-Gaussian model is better',
+                                              'Gaussian model is better')) &
+  scale_shape_manual(values=1, guide=FALSE) &
+  theme(legend.position = 'bottom') &
+  theme(aspect.ratio = 1); p_all
+
+# ggsave('fig_roi_comparison.png',
+#        p_all, width = 5, height = 5.1, units = 'in')
+```
+
+

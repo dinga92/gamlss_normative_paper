@@ -1,0 +1,323 @@
+---
+title: "Recalibrating normative models to new sites"
+author: "Richard Dinga"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+
+Let's say we have a normative model build in one site, and we would like to use it in another site. The problem is that subjects in a new site might follow a different distribution. So we would like to use a subsample from the new site, to adjust the normative model. Specifically, we are interested in adjusting the intercept and scale of the distribution. 
+
+# Easy scenario - gaussian homoskedastic model
+
+First, let's look at an easy version of this problem, where a gaussian homoskedastic model can approximate the data.
+
+```{r, echo=FALSE, fig.width=4, fig.height=2}
+n <- 1000
+x <- seq(0, 100, length.out = n)
+sigmas <- 0.5 + 1.5*seq(from = -1, to = 1, length.out = n)**2
+y  <- 50 + 0.15*x - 0.003*(x**2) + rnorm(n)
+y2 <- 60 + 0.15*x - 0.003*(x**2) + rnorm(n)*2
+
+df1 <- data.frame('x' = x, 'y' = y, 'dataset'='Training site')
+df2 <- data.frame('x' = x, 'y' = y2, 'dataset'='New site')
+df_both <- rbind(df1, df2)
+
+library(ggplot2)
+ggplot(df_both) +
+  geom_point(aes(x=x, y=y, color=dataset)) +
+  facet_wrap(~dataset) +
+  theme(legend.position = 'none')
+```
+
+The procedure to adjust this model to a new site is simple and does not require any specialized machinery. The steps are as follows
+
+1. get the predictions from the old model for the data in the new sites
+2. subtract the predictions from the data to get residuals
+3. calculate mean and the standard deviations of the residuals
+4. adjust the old model, the adjusted intercept is the old intercept + mean of the residuals. The adjusted sigma is the standard deviation of the residuals.
+
+We can also put a prior on the mean or sigma to get possibly more accurate estimates, similarly to what Mosi did. 
+
+```{r, echo=FALSE, results='hide', message=FALSE,  fig.width=8, fig.height=3}
+library(mgcv)
+library(patchwork)
+
+gam1 <- gam(y ~ s(x),  data=df1)
+df2$predictions <- predict(gam1, newdata=df2)
+
+gam1_recalibrated <- gam1
+gam1_recalibrated$coefficients['(Intercept)'] <- (
+  gam1_recalibrated$coefficients['(Intercept)'] + mean(df2$y - df2$predictions))
+
+df2$predictions_recalibrated <- predict(gam1_recalibrated, newdata=df2)
+
+
+p1 <- ggplot(df2, aes(x=x)) +
+  geom_point(aes(y=y), color='#00BFC4') +
+  geom_line(aes(y=predictions)) +
+  geom_label(data = data.frame(
+    x = 25, y = 49, y, label = "Predicted values"),
+    mapping = aes(x = x, y = y, label = label), hjust = 0.15) 
+
+p2 <- ggplot(df2, aes(x=x)) +
+  geom_point(aes(y=y-predictions), color='#00BFC4') +
+  stat_summary(aes(y=y-predictions, x=min(x-5)),  geom='pointrange',
+               color='red', fun = mean,
+               fun.min = function(x) mean(x) - sd(x)/2, 
+               fun.max = function(x) mean(x) + sd(x)/2) + 
+  geom_curve(data = data.frame(x = -4, y = 8,  xend = -4, yend = 9.8),
+             mapping = aes(x = x, y = y, xend = xend, yend = yend),
+             angle = 90L, colour = "black", curvature = 0.5, 
+             arrow = arrow(angle = 30, length = unit(0.2, "cm")),
+             inherit.aes = FALSE, show.legend = FALSE) + 
+  geom_curve(data = data.frame(x = -4, y = 12,  xend = -4, yend = 10.5),
+             mapping = aes(x = x, y = y, xend = xend, yend = yend),
+             angle = 90L, colour = "black", curvature = -0.5, 
+             arrow = arrow(angle = 30, length = unit(0.2, "cm")),
+             inherit.aes = FALSE, show.legend = FALSE) +
+  geom_label(data = data.frame(
+    x = -5.5, y = 8, y, label = "Adjsut intercept by this much"), 
+    mapping = aes(x = x, y = y, label = label), hjust = 0) +
+  geom_label(data = data.frame(
+    x = -5.5, y = 12, y, label = "New sigma"),
+    mapping = aes(x = x, y = y, label = label), hjust = 0)
+
+p3 <- ggplot(df2, aes(x=x)) +
+  geom_point(aes(y=y), color='#00BFC4') +
+  geom_line(aes(y=predictions_recalibrated)) +
+  geom_line(aes(y=predictions_recalibrated - 2*sd(y - predictions_recalibrated))) +
+  geom_line(aes(y=predictions_recalibrated - sd(y - predictions_recalibrated))) +
+  geom_line(aes(y=predictions_recalibrated + sd(y - predictions_recalibrated))) +
+  geom_line(aes(y=predictions_recalibrated + 2*sd(y - predictions_recalibrated))) 
+
+p1 + p2 + p3
+```
+
+# Hard scenario - nongaussian, heteroskedastic model
+
+The approach of estimating mean and standard deviation from the residuals won't work for more complicated data distributions and models, such as heteroskedastic and nongaussian models. There are a few reasons for that. These reasons might be different for a different distribution or a different parametrization of distribution but in general
+
+1. the predicted values are not a conditional average of the distribution, so estimating mean of the residuals won't work
+2. standard deviation of the distribution is not the sigma parameter of distribution, so estimating standard deviation won't work
+3. sigma is heteroskedastic so that we would have different estimates in different age bins
+
+```{r, echo=FALSE, results='hide', message=FALSE,  fig.width=4, fig.height=2}
+library(gamlss.dist)
+library(ggplot2)
+
+n <- 1000
+x <- seq(0, 100, length.out = n)
+sigmas <- 0.5 + 1.5*seq(from = -1, to = 1, length.out = n)**2
+y  <- 50 + 0.15*x - 0.003*(x**2) + rSHASHo2(n = n, sigma = sigmas,   nu=-1, tau=1)
+y2 <- 60 + 0.15*x - 0.003*(x**2) + rSHASHo2(n = n, sigma = sigmas*2, nu=-1, tau=1)
+
+df1 <- data.frame('x' = x, 'y' = y, 'dataset'='Training site')
+df2 <- data.frame('x' = x, 'y' = y2, 'dataset'='New site')
+df_both <- rbind(df1, df2)
+
+ggplot(df_both) +
+  geom_point(aes(x=x, y=y, color=dataset)) +
+  facet_wrap(~dataset) +
+  theme(legend.position = 'none')
+```
+
+What can we do instead? Refit specific parameters of the old model, but keeping the other parameters intact. Recall that in a GAMLSS framework, we fit a multiple parameter distribution to the data, and the value of each parameter corresponds to a different function. I.e.
+
+Shash(mu, sigma, nu, tau)
+mu = beta_mu_0 + f_mu(x)
+sigma = beta_sigma_0 + f_sigma(x)
+nu = beta_nu_0 
+tau = beta_tau_0 
+
+Here we fit a shash distribution, where the location of distribution is modeled as a smooth function of x, the scale of the distribution (sigma) is modeled as a smooth function of x, skewness, and kurtosis of the distributions are modeled only as an intercept, so they don't vary according to x. 
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+library(mgcv)
+library(mgcFam)
+library(reshape2)
+
+gam1 <- gam(list(y ~ s(x), # fit mu as a smooth function of x
+                   ~ s(x), # fit sigma as a smooth function of x
+                   ~ 1, # fit nu (skewness) as an intercept
+                   ~ 1), # fit tau (kurtosis) as an intercept
+            family=shash(),
+            data=df1)
+
+df1 <- cbind(df1, (predict(gam1, newdata = df1)))
+df2 <- cbind(df2, (predict(gam1, newdata = df2)))
+names(df1)[4:7] <- c('predictions.mu', 'predictions.sigma',
+                     'predictions.nu', 'predictions.tau')
+names(df2)[4:7] <- c('predictions.mu', 'predictions.sigma',
+                     'predictions.nu', 'predictions.tau')
+```
+
+To adjust this model, we fit a recalibration model 
+
+Shash(mu, sigma, nu, tau)
+mu = beta_mu_0 + predicted_mu(x)
+sigma = beta_sigma_0 + predicted_sigma(x)
+nu = predicted_nu 
+tau = predicted_tau 
+
+Predicted mu, sigma, nu, tau, are parameters predicted by the old model. In the recalibration model, these values are fixed to have a beta coefficient of 1. So we don't fit weights for these values. We fit an intercept for mu and an intercept for sigma. Smooth effects of x and mu and sigma and intercepts for nu and tau are not being fitted.
+
+In R, this can be achieved using an offset function
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+library(gamlss)
+library(gamlss.dist)
+
+fitted_nu <- coefficients(gam1)['(Intercept).2']
+fitted_tau <- coefficients(gam1)['(Intercept).3']
+```
+
+
+```{r, results='hide', message=FALSE}
+gam_refit <- gamlss(
+  # refit intercept for mu, predictions.mu are forced to have coef=1
+  y ~ 1 + offset(predictions.mu),
+  # refit intercept for sigma, predictions.mu are forced to have coef=1
+  sigma.formula = ~ 1 + offset(predictions.sigma),
+  # nu is fixed to a given value
+  nu.fix = T,
+  nu.start = fitted_nu,
+  # taus is fixed to a given value
+  tau.fix = T,
+  tau.start = exp(fitted_tau),
+  family=SHASHo2,
+  data=df2,
+  method=mixed(5,50))
+```
+
+Now we can create the recalibrated model by adjsuting mu and sigma intercepts 
+beta_mu_0_adjusted = beta_mu_0_old + beta_mu_0_recalibration
+beta_sigma_0_adjusted = beta_sigma_0_old + beta_sigma_0_recalibration
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+gam_recalibrated <- gam1 
+
+gam_recalibrated$coefficients['(Intercept)'] <- gam_recalibrated$coefficients['(Intercept)'] + gam_refit$mu.coefficients
+gam_recalibrated$coefficients['(Intercept).1'] <- gam_recalibrated$coefficients['(Intercept).1'] + gam_refit$sigma.coefficients
+```
+
+The final result. A beautiful nongaussian, nonlinear, heteroskedastic model, ready to be used in a new site, for a price of fitting two coefficients. 
+
+```{r, echo=FALSE, results='hide', message=FALSE,  fig.width=4, fig.height=2}
+predictions_recalibrated <- as.data.frame(predict(gam_recalibrated, newdata = df2))
+names(predictions_recalibrated) <- c('predictions.mu', 'predictions.sigma',
+                                     'predictions.nu', 'predictions.tau')
+
+predicted_quantiles <- as.data.frame(sapply(pnorm(c(-2,-1,0,1,2)),
+     function(q){qSHASHo2(q, df1$predictions.mu, exp(df1$predictions.sigma),
+                          df1$predictions.nu, exp(df1$predictions.tau))}))
+predicted_quantiles$x <- df1$x
+predicted_quantiles_long <- reshape2::melt(predicted_quantiles, id.vars = c('x'))
+predicted_quantiles_long$dataset = factor('Training site')
+
+predicted_quantiles2 <- as.data.frame(sapply(pnorm(c(-2,-1,0,1,2)), 
+     function(q){qSHASHo2(q, predictions_recalibrated$predictions.mu,
+                          exp(predictions_recalibrated$predictions.sigma), 
+                          predictions_recalibrated$predictions.nu,
+                          exp(predictions_recalibrated$predictions.tau))}))
+predicted_quantiles2$x <- df2$x
+predicted_quantiles_long2 <- reshape2::melt(predicted_quantiles2, id.vars = c('x'))
+predicted_quantiles_long2$dataset = factor('New site')
+
+ggplot(df_both) +
+  geom_point(aes(x=x, y=y, color=dataset)) +
+  geom_line(data=predicted_quantiles_long, aes(x=x, y=value, group=variable))  +
+  geom_line(data=predicted_quantiles_long2, aes(x=x, y=value, group=variable))  +
+  facet_wrap(~dataset)  
+  # theme(legend.position = 'none') +
+  # xlab('Age') + ylab("Thickness") +
+  # theme_minimal_grid() + theme(legend.position = 'none') +
+  # scale_color_OkabeIto(order = c(1, 2))
+  
+```
+
+```{r}
+p1 <- ggplot(df_both[df_both$dataset=="Training site",]) +
+  geom_point(aes(x=x, y=y, color=dataset)) +
+  geom_line(data=predicted_quantiles_long, aes(x=x, y=value, group=variable)) +
+  scale_color_OkabeIto(order=5) + 
+  ggtitle(label = '1. Have a model estimated in a separate site')
+
+p2 <- ggplot(df_both[df_both$dataset=="New site",][sample(1:1000, 50),]) +
+  geom_point(aes(x=x, y=y, color=dataset)) +
+  geom_line(data=predicted_quantiles_long, aes(x=x, y=value, group=variable))  +
+  geom_line(data=predicted_quantiles_long2, aes(x=x, y=value, group=variable), linetype='dotted') +
+  scale_color_OkabeIto(order=6) +
+  ggtitle(label = '2. Use a small subsample of\nsubjects from a new site\nto adjust selected model\n parameters while keeping other\nfixed')
+  
+
+p3 <- ggplot(df_both[df_both$dataset=="New site",]) +
+  geom_point(aes(x=x, y=y, color=dataset)) +
+  geom_line(data=predicted_quantiles_long2, aes(x=x, y=value, group=variable)) +
+  scale_color_OkabeIto(order=6) +
+  ggtitle(label = '3. use the adjusted model\nin the new site')
+
+p1 + p2 + p3 + plot_layout(guides='collect') & theme_cowplot() & ylim(c(20,65)) & theme(legend.position = 'none') &
+  theme(legend.position = 'none',
+        axis.text.x = element_text(size=7),
+        plot.title = element_text(size=7),
+        axis.text.y=element_text( size=7),
+        axis.title.y=element_text( size=7),
+        text=element_text(size=7))
+
+
+ggsave('recalinration.png', width = 7, height = 3)
+```
+
+
+
+We can also see that the randomized residuals (pseudo-z) are homoskedastic and normally distributed.
+
+```{r, echo=FALSE, results='hide', message=FALSE,  fig.width=4, fig.height=2}
+calc_predictions_z <- function(y, params){
+  if(ncol(params) == 2){
+    params <- cbind(params, rep(0, nrow(params)))
+    params <- cbind(params, rep(log(1), nrow(params)))
+  }
+  quantiles <- pSHASHo2(y, mu=params[,1], sigma=exp(params[,2]), nu=params[,3],
+            tau=exp(params[,4]))
+   z <- qnorm(quantiles, mean = 0, sd = 1)
+}
+
+df2$z <- calc_predictions_z(df2$y, predictions_recalibrated)
+
+library(patchwork)
+
+p1 <- ggplot(df2, aes(x=x, y=y)) + 
+  geom_point() +
+  geom_line(data=predicted_quantiles_long2, aes(x=x, y=value, group=variable),
+            color='red')
+
+p2 <- ggplot(df2, aes(x=x, y=z)) + 
+  geom_point()
+
+p3 <- ggplot(df2, aes(x=z)) +
+  geom_histogram(aes(y=..density..), bins=100, fill='grey50') +
+  geom_density(color='blue') +
+  stat_function(fun = dnorm, args = list(mean = 0, sd = 1), col='red')
+
+p4 <- ggplot(df2) +
+  geom_qq(aes(sample=z),
+          dparams = list(mean=0, sd=1)) +
+  geom_qq_line(aes(sample=z)) + 
+  coord_fixed()
+
+p1 + p2
+```
+
+```{r, echo=FALSE, fig.width=4, fig.height=2}
+p3 + p4
+```
+

@@ -1,0 +1,168 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+
+simulate the data
+
+
+```{r}
+library(gamlss.dist)
+
+n <- 1000
+x <- seq(0, 100, length.out = n)
+sigmas <- 0.5 + 1.5*seq(from = -1, to = 1, length.out = n)**2
+y  <- 50 + 0.15*x - 0.003*(x**2) + rSHASHo2(n = n, sigma = sigmas,   nu=-1.5, tau=1)
+
+df1 <- data.frame('x' = x, 'y' = y, 'dataset'='Training site')
+```
+
+fit the models
+
+```{r}
+library(mgcv)
+library(reshape2)
+
+
+m1 <- gam(list(y ~ x, # basically the same model as lm(y~x, data=df1)
+                   ~ 1), 
+            family=gaulss(),
+            data=df1)
+
+m2 <- gam(list(y ~ s(x), # fit mu as a smooth function of x
+                   ~ 1), # fit sigma only as an intercept
+            family=gaulss(),
+            data=df1)
+
+m3 <- gam(list(y ~ s(x), # fit mu as a smooth function of x
+                   ~ s(x)), # fit sigma as a smooth function of x
+            family=gaulss(),
+            data=df1)
+
+m4 <- gam(list(y ~ s(x), # fit mu as a smooth function of x
+                   ~ s(x), # fit sigma as a smooth function of x
+                   ~ 1, # fit nu (skewness) as an intercept
+                   ~ 1), # fit tau (kurtosis) as an intercept
+            family=shash(), # shash distribution instead of gaussian 
+            data=df1)
+```
+
+get predictions
+
+```{r}
+predictions_params_m1 <- predict(m1, newdata = df1)
+predictions_params_m2 <- predict(m2, newdata = df1)
+predictions_params_m3 <- predict(m3, newdata = df1)
+predictions_params_m4 <- predict(m4, newdata = df1)
+```
+
+get estimated quantiles
+
+```{r}
+params_to_quantiles_norm <- function(quantiles, params){
+  as.data.frame(sapply(quantiles, 
+      function(q){
+        qnorm(p=q, mean=params[,1], sd = exp(params[,2]))
+      }))
+}
+
+
+params_to_quantiles_shash <- function(quantiles, params, qshash){
+  as.data.frame(sapply(quantiles, 
+      function(q){
+        qshash(p=q, 
+               # param is called mu, but it expects 
+               # a vector of all 4 shash parameters
+               mu=params)
+      }))
+}
+
+
+
+quantiles <- pnorm(c(-2:2))
+qshash <- m4$family$qf
+
+predictions_quantiles_m1 <- params_to_quantiles_norm(quantiles, 
+                                                     predictions_params_m1)
+predictions_quantiles_m2 <- params_to_quantiles_norm(quantiles,
+                                                     predictions_params_m2)
+predictions_quantiles_m3 <- params_to_quantiles_norm(quantiles, 
+                                                     predictions_params_m3)
+predictions_quantiles_m4 <- params_to_quantiles_shash(quantiles, 
+                                                      predictions_params_m4,
+                                                      qshash)
+
+reshape_quantiles_to_long <- function(quantiles_df, x_var){
+  quantiles_df$x <- x_var
+  return(reshape2::melt(quantiles_df, id.vars = c('x')))
+}
+
+predictions_quantiles_m1_long <- reshape_quantiles_to_long(predictions_quantiles_m1, df1$x)
+predictions_quantiles_m2_long <- reshape_quantiles_to_long(predictions_quantiles_m2, df1$x)
+predictions_quantiles_m3_long <- reshape_quantiles_to_long(predictions_quantiles_m3, df1$x)
+predictions_quantiles_m4_long <- reshape_quantiles_to_long(predictions_quantiles_m4, df1$x)
+```
+
+
+```{r, fig.width=5, fig.asp=1}
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+
+p1 <- ggplot(df1) +
+  geom_point(aes(x=x, y=y), color='#56B4E9', shape=21) +
+  geom_line(data=predictions_quantiles_m1_long, aes(x=x, y=value, group=variable)) +
+  labs(title='Linear model',
+       # subtitle='Mean of y is modeled as a linear function of x',
+       x = 'Age\nx', 
+       y='y\nAverage cortical thickness')  +
+  annotate("text", x = 35, y = 30, size=3,
+              label = "y ~ N(μ, σ)\nμ = βx") +
+  ylim(c(20,60));
+
+p2 <- ggplot(df1) +
+  geom_point(aes(x=x, y=y), color='#56B4E9', shape=21) +
+  geom_line(data=predictions_quantiles_m2_long, aes(x=x, y=value, group=variable)) +
+  labs(title='GAM - homoskedastic',
+       # subtitle='Mean of y is modeled as a smooth function of x',
+       x = 'Age\nx', 
+       y='y\nAverage cortical thickness')  +
+  annotate("text", x = 35, y = 30, size=3,
+              label = "y ~ N(μ, σ)\nμ = f(x)") +
+  ylim(c(20,60))
+
+p3 <- ggplot(df1) +
+  geom_point(aes(x=x, y=y), color='#56B4E9', shape=21) +
+  geom_line(data=predictions_quantiles_m3_long, aes(x=x, y=value, group=variable)) +
+  labs(title='GAM - heteroskedastic',
+       # subtitle='Mean and variance of y are modeled\nas smooth funcitons of x',
+       x = 'Age\nx', 
+       y='y\nAverage cortical thickness')  +
+  annotate("text", x = 35, y = 30, size=3,
+              label = "y ~ N(μ, σ)\nμ = f₁(x); σ = f₂(x)") +
+  ylim(c(20,60))
+
+p4 <- ggplot(df1) +
+  geom_point(aes(x=x, y=y), color='#56B4E9', shape=21) +
+  geom_line(data=predictions_quantiles_m4_long, 
+            aes(x=x, y=value, group=variable)) +
+  labs(title='GAMLSS',
+       # subtitle='Location, scale, and shape\nare modeled as functions of x',
+       x = 'Age\nx', 
+       y='y\nAverage cortical thickness')  + 
+  annotate("text", x = 35, y = 30, size=3,
+           label = "y ~ D(μ, σ, ν, τ)\nμ = f₁(x); σ = f₂(x)\nν = f₃(x); τ = f₄(x)") +
+  ylim(c(20,60)); 
+
+
+p_all <- p1 + p2 + p3 + p4 + 
+  plot_annotation(tag_levels = 'A') & 
+  theme_cowplot() &
+  theme(text=element_text(size=9),
+                  axis.text = element_text(size=9)); p_all
+
+# ggsave('fig_lm_to_gamls.png',
+#        p_all, width = 5, height = 5, units = 'in')
+```
+

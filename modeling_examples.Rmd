@@ -1,0 +1,347 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+this whole thing takes about a minute, minute and a half, to run on my laptop, most spent on the fitting of m3d and m3e
+
+load
+
+```{r}
+set.seed(1)
+start.time <- Sys.time()
+source('helpers.R') 
+
+library(caret)
+library(data.table)
+
+data <- as.data.frame(fread('all_data_mosi.csv', sep = ','))
+data <- data[data$diagnosis == 0,]
+data_ukbb <- as.data.frame(fread('all_data.csv', sep = ','))
+data_ukbb <- data_ukbb[data_ukbb$site_id == 11025,]
+data <- rbind(data_ukbb, data)
+
+# get rid of small sites
+selected_sites <- names(table(data$site_id)[table(data$site_id) >= 30])
+data <- data[data$site_id %in% selected_sites,]
+data$site_id <- as.factor(data$site_id)
+data$site_id <- droplevels(data$site_id)
+
+# get rid of a few obvious outliers
+data <- data[complete.cases(data),]
+data <- data[data$Median_Thickness < 3.5 & data$Median_Thickness > 1.9,]
+
+train_idx_ukbb <- createDataPartition(data$age, p = 0.7, list = F)
+df_train_ukbb <- data_ukbb[train_idx_ukbb,]
+df_test_ukbb <- data_ukbb[-train_idx_ukbb,]
+
+train_idx <- createDataPartition(data$site_id, p = 0.7, list = F)
+df_train_allsites <- data[train_idx,]
+df_test_allsites <- data[-train_idx,]
+```
+
+## fit age effects
+
+```{r}
+df_train_ukbb_females <- df_train_ukbb[df_train_ukbb$gender == 1,]
+df_test_ukbb_females <- df_test_ukbb[df_test_ukbb$gender == 1,]
+
+library(mgcv)
+
+# linear, gaussian, homoskedastic model
+# this is basically the same as lm(Mean_Thickness ~ age, data=df)
+m1a <- gam(list(Median_Thickness ~ age,
+                 ~ 1),
+            data=df_train_ukbb_females,
+            family = gaulss(),
+            optimizer = 'efs')
+
+m1b <- gam(list(Median_Thickness ~ s(age),
+                 ~ 1),
+            data=df_train_ukbb_females,
+            family = gaulss(),
+            optimizer = 'efs')
+
+m1c <- gam(list(Median_Thickness ~ s(age),
+                 ~ s(age)),
+            data=df_train_ukbb_females,
+            family = gaulss(),
+            optimizer = 'efs')
+
+m1d <- gam(list(Median_Thickness ~ s(age), # formula for mu
+                              ~ s(age), # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_ukbb_females,
+          family = shash(),
+          optimizer = 'efs')
+
+m1e <- gam(list(Median_Thickness ~ s(age), # formula for mu
+                              ~ s(age), # formula for sigma
+                              ~ s(age), # formula for nu (skewness)
+                              ~ s(age)), # formula for tau (kurtosis)
+          data=df_train_ukbb_females,
+          family = shash(),
+          optimizer = 'efs')
+```
+
+## modeling gender effects
+
+```{r}
+m2a <- gam(list(Median_Thickness ~ s(age), # formula for mu
+                              ~ s(age), # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_ukbb,
+          family = shash(),
+          optimizer = 'efs')
+
+m2b <- gam(list(Median_Thickness ~ s(age) + gender, # formula for mu
+                              ~ s(age), # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_ukbb,
+          family = shash(),
+          optimizer = 'efs')
+
+m2c <- gam(list(Median_Thickness ~ s(age, by=as.factor(gender)) + gender, # formula for mu
+                              ~ s(age), # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_ukbb,
+          family = shash(),
+          optimizer = 'efs')
+
+m2d <- gam(list(Median_Thickness ~ s(age, by=as.factor(gender)) + gender, # formula for mu
+                              ~ s(age) + gender, # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_ukbb,
+          family = shash(),
+          optimizer = 'efs')
+
+m2e <- gam(list(Median_Thickness ~ s(age, by=as.factor(gender)) + gender, # formula for mu
+                              ~  s(age, by=as.factor(gender)) + gender, # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_ukbb,
+          family = shash(),
+          optimizer = 'efs')
+```
+
+## modeling site effects
+
+```{r}
+m3a <- gam(list(Median_Thickness ~ s(age), # formula for mu
+                              ~ s(age), # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_allsites,
+          family = shash(),
+          optimizer = 'efs')
+
+m3b <- gam(list(Median_Thickness ~ s(age) + site_id, # formula for mu
+                              ~ s(age), # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_allsites,
+          family = shash(),
+          optimizer = 'efs')
+
+m3c <- gam(list(Median_Thickness ~ s(age) + s(site_id, bs = 're'), # formula for mu
+                              ~ s(age), # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_allsites,
+          family = shash(),
+          optimizer = 'efs')
+
+m3d <- gam(list(Median_Thickness ~ s(age) + s(site_id, bs = 're'), # formula for mu
+                              ~ s(age) + site_id, # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_allsites,
+          family = shash(),
+          optimizer = 'efs')
+
+m3e <- gam(list(Median_Thickness ~ s(age) + s(site_id, bs = 're'), # formula for mu
+                              ~  s(age) + s(site_id, bs = 're'), # formula for sigma
+                              ~ 1, # formula for nu (skewness)
+                              ~ 1), # formula for tau (kurtosis)
+          data=df_train_allsites,
+          family = shash(),
+          optimizer = 'efs')
+```
+
+
+
+```{r}
+library(qpcR)
+
+create_training_set_table <- function(model_names, aic_values, bic_values){
+  return(data.frame(
+    model=model_names,
+    AIC=aic_values,
+    ΔAIC=qpcR::akaike.weights(aic_values)$weights,
+    # rel.AIC=qpcR::akaike.weights(aic_values)$rel.LL,
+    'AIC weights'=qpcR::akaike.weights(aic_values)$weights,
+    BIC=bic_values,
+    ΔBIC=qpcR::akaike.weights(bic_values)$weights,
+    # rel.BIC=qpcR::akaike.weights(bic_values)$rel.LL,
+    'BIC weights'=qpcR::akaike.weights(bic_values)$weights)
+  )
+}
+                 
+table_1a <- create_training_set_table(
+  model_names=c('M1a', 'M1b', 'M1c', 'M1d', 'M1e'),
+  aic_values = AIC(m1a, m1b, m1c, m1d, m1e)$AIC,
+  bic_values = BIC(m1a, m1b, m1c, m1d, m1e)$BIC)
+
+table_2a <- create_training_set_table(
+  model_names=c('M2a', 'M2b', 'M2c', 'M2d', 'M2e'),
+  aic_values = AIC(m2a, m2b, m2c, m2d, m2e)$AIC,
+  bic_values = BIC(m2a, m2b, m2c, m2d, m2e)$BIC)
+
+table_3a <- create_training_set_table(
+  model_names=c('M3a', 'M3b', 'M3c', 'M3d', 'M3e'),
+  aic_values = AIC(m3a, m3b, m3c, m3d, m3e)$AIC,
+  bic_values = BIC(m3a, m3b, m3c, m3d, m3e)$BIC)
+
+table_1a
+table_2a
+table_3a
+
+library(sjPlot)
+# tab_df(table_1a, file="table1a.doc")
+# tab_df(table_2a, file="table2a.doc")
+# tab_df(table_3a, file="table3a.doc")
+```
+
+
+
+```{r}
+model <- m1a
+model_name <- 'M1a'
+
+create_test_set_table <- function(fitted_models, model_names, df_test_data, target_variable){
+  results <- list()
+  for(i in seq_along(fitted_models)){
+    model <- fitted_models[[i]]
+    model_name <- model_names[i]
+    
+    predictions <- as.data.frame(predict(model, newdata =  df_test_data))
+    scores <- params_to_scores(target_variable, predictions)
+    descriptives <- calibration_descriptives(scores$z_randomized)
+    results[[i]] <- data.frame(model = model_name,
+               logscore = mean(scores$log_densities),
+               # avg.cens.logscore = mean(scores$log_densities_censored),
+               skewness = descriptives$skew,
+               kurtosis = descriptives$kurtosis,
+               W = descriptives$W)
+  }
+  return(do.call(rbind, results))
+}
+
+
+table_1b <- create_test_set_table(fitted_models = list(m1a, m1b, m1c, m1d, m1e),
+                      model_names = c('M1a', 'M1b', 'M1c', 'M1d', 'M1e'),
+                      df_test_data = df_test_ukbb_females,
+                      target_variable = df_test_ukbb_females$Mean_Thickness)
+
+table_2b <- create_test_set_table(fitted_models = list(m2a, m2b, m2c, m2d, m2e),
+                      model_names = c('M2a', 'M2b', 'M2c', 'M2d', 'M2e'),
+                      df_test_data = df_test_ukbb,
+                      target_variable = df_test_ukbb$Mean_Thickness)
+
+table_3b <- create_test_set_table(fitted_models = list(m3a, m3b, m3c, m3d, m3e),
+                      model_names = c('M3a', 'M3b', 'M3c', 'M3d', 'M3e'),
+                      df_test_data = df_test_allsites,
+                      target_variable = df_test_allsites$Mean_Thickness)
+
+table_1b
+table_2b
+table_3b
+
+# library(sjPlot)
+# tab_df(table_1b, file="table1b.doc")
+# tab_df(table_2b, file="table2b.doc")
+# tab_df(table_3b, file="table3b.doc")
+```
+
+
+```{r}
+predictions_quantiles_long_all <- list()
+scores_all <- list()
+
+models <- list('M1a'=m1a, 'M1b'=m1b, 'M1c'=m1c, 'M1d'=m1d, 'M1e'=m1e)
+for (i in seq_along(models)){
+  model_name <- names(models)[i]
+  model <- models[[i]]
+  predictions <- as.data.frame(predict(model, newdata = df_test_ukbb_females))
+  predictions_quantiles <- params_to_quantiles(predictions, pnorm(c(-2,-1,0,1,2)))
+  predictions_quantiles$age <- df_test_ukbb_females$age
+  predicted_quantiles_long <- reshape2::melt(predictions_quantiles, id.vars = c('age'))
+  predicted_quantiles_long$model <- model_name
+  predictions_quantiles_long_all[[model_name]] <- predicted_quantiles_long
+  scores <- params_to_scores(df_test_ukbb_females$Mean_Thickness,
+                             predictions)
+  scores$model <- model_name
+  scores_all[[i]] <- scores
+}
+predictions_quantiles_long_all <- do.call(rbind, predictions_quantiles_long_all)
+scores_all <- do.call(rbind, scores_all)
+```
+
+
+
+```{r, fig.width=8, fig.height=4}
+library(ggpointdensity)
+library(cowplot)
+library(colorblindr)
+library(patchwork)
+library(qqplotr)
+
+p1 <- ggplot(df_test_ukbb_females) +
+  geom_pointdensity(aes(x=age, y=Median_Thickness)) +
+  geom_line(data=predictions_quantiles_long_all, 
+            color='black',
+            aes(x=age, y=value, group=variable))  +
+  scale_color_distiller(palette = "Spectral") +
+  facet_wrap(~model) + 
+  theme_cowplot() +
+  theme(legend.position = 'none');p1
+
+p2 <- ggplot(scores_all, aes(sample=z_randomized, color=model, shape=model)) + 
+  geom_qq(dparams = list('mean'=0, 'sd'=1)) +
+  # geom_qq_line(dparams = list('mean'=0, 'sd'=1), color='red') +
+  geom_abline(intercept = 0, slope = 1, color='black') +
+  theme_cowplot() +
+  scale_color_OkabeIto(order=c(1:3,5:8)) +
+  theme(legend.position = c(0,0.9)) +
+  coord_fixed(); p2
+
+p3 <- ggplot(scores_all) + 
+  stat_qq_band(data=scores_all[scores_all$model=='M1a',],
+               aes(sample=z_randomized),
+               detrend=T, fill=NA, color='black', size=0.5) +
+  stat_qq_point(detrend=T,  aes(sample = z_randomized, color=model, shape=model)) +
+  geom_hline(yintercept = 0) +
+  scale_shape_manual(values = 1:5) + 
+  # ylim(c(-1,1)) +
+  scale_color_OkabeIto(order=c(1:3,5:8)) +
+  theme_cowplot() +
+  theme(legend.position = c(0.5,0.25))  +
+  coord_cartesian(); p3
+
+p1 + p3 + plot_layout(widths = c(1.5,1)) +
+  plot_annotation(tag_levels = 'A') 
+
+# ggsave('fig_model_comparisons.png', width = 8, height = 4)
+```
+
+
+```{r}
+end.time <- Sys.time()
+elapsed.time <- round((end.time - start.time), 3)
+print(elapsed.time)
+```
